@@ -16,7 +16,10 @@ venv/
 # Jupyter
 .ipynb_checkpoints/
 
-# LaTeX
+# LaTeX (source files — paper lives separately, not in this repo)
+paper/
+main.tex
+references.bib
 *.aux
 *.bbl
 *.blg
@@ -28,9 +31,31 @@ venv/
 *.toc
 *.lof
 *.lot
+*.pdf
+
+# Large experiment artifacts (not tracked — regenerate via scripts)
+# Observables: ~280k .npz files (~29 GB total)
+results/*/observables/
+results/*/teacher_targets/
+results/*/checkpoint_best.pt
+results/*/checkpoint_final.pt
+*.npz
+*.pt
+
+# Raw dataset (download via: python -m data.download)
+data/uci_har/
+
+# Experiment logs (reproducible)
+results/*.log
+results/*_summary.json
 
 # macOS
 .DS_Store
 
 # VS Code
 .vscode/
+
+# GitHub
+.github/instructions/
+.instructions
+.pytest_cache/

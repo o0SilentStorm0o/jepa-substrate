@@ -1,0 +1,6 @@
+{
+  "seed": 3,
+  "masking_policy": "future_block",
+  "substrate": "ann",
+  "condition": "primary"
+}

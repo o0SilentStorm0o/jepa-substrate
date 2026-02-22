@@ -1,0 +1,6 @@
+{
+  "seed": 3,
+  "masking_policy": "multi_target",
+  "substrate": "snn",
+  "condition": "primary"
+}

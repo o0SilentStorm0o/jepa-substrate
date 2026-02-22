@@ -1,0 +1,6 @@
+{
+  "seed": 7,
+  "masking_policy": "random_drop",
+  "substrate": "ann",
+  "condition": "primary"
+}

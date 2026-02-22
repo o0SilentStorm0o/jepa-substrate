@@ -1,0 +1,107 @@
+# ============================================================================
+# LavaJEPA: Experiment Configuration
+# ============================================================================
+# This file is the sole source of truth for both ANN and SNN implementations.
+# All degrees of freedom are consolidated here.
+# After the freeze point (git tag freeze-v1), no value may change.
+# ============================================================================
+
+data:
+  dataset: "uci_har"
+  # UCI Human Activity Recognition Using Smartphones
+  url: "https://archive.ics.uci.edu/ml/machine-learning-databases/00240/UCI%20HAR%20Dataset.zip"
+  sha256: "2f853b3f1dab1361943d3e3c5e994a72df18e44e495a9a2c4c62c1e58da tried"
+  sampling_rate_hz: 50
+  window_length_sec: 2.56
+  T: 128                # samples per window (50 Hz * 2.56 s)
+  D: 6                  # input channels (3-axis accel + 3-axis gyro)
+  normalization: "zscore"  # per-channel z-score on training set only
+  split_ratios:
+    train: 0.70
+    val: 0.15
+    test: 0.15
+  # Subject IDs: 21 train / 4 val / 5 test out of 30
+  n_subjects: 30
+  n_train_subjects: 21
+  n_val_subjects: 4
+  n_test_subjects: 5
+
+model:
+  H: 128                # latent dimension
+  encoder_type: "gru"   # ANN encoder type
+  predictor_layers: 2   # predictor MLP depth
+  predictor_hidden: 128 # predictor hidden size (H -> H -> H)
+  tau_ema: 0.996        # EMA momentum (fixed, not annealed)
+  # SNN-specific
+  v_th: 1.0             # firing threshold
+  tau_mem: 10            # membrane time constant (steps)
+  beta: 0.904837        # exp(-1/tau_mem) = exp(-0.1)
+  surrogate_k: 25       # fast sigmoid surrogate steepness
+  trace_alpha: 0.9      # spike trace decay constant
+  c_mask: 1.0           # SNN mask bias current magnitude
+
+training:
+  N_train: 5000         # total training steps
+  lr_max: 0.001         # peak learning rate
+  warmup_fraction: 0.05 # linear warmup = 5% of N_train = 250 steps
+  optimizer: "adamw"
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+  loss: "mse"           # loss function
+  val_every: 500         # validate every N steps
+  masking_policy: "future_block"  # baseline policy
+
+masking:
+  # (i) Future-block prediction (baseline)
+  future_block:
+    context_fraction: 0.75  # t0 = floor(0.75 * T) = 96
+    # target = remaining 25% = 32 timesteps
+  # (ii) Random drop-in-window
+  random_drop:
+    target_probability: 0.25
+  # (iii) Multi-target blocks
+  multi_target:
+    n_blocks: 2
+    block_length_fraction: 0.125   # floor(0.125 * T) = 16
+    min_gap_fraction: 0.0625       # floor(0.0625 * T) = 8
+
+measurement:
+  batch_size: 1
+  warmup_calls: 5       # untimed warm-up passes
+  timed_repetitions: 1000  # latency benchmark calls
+  thread_count: 1
+  # Lava configuration
+  lava_sim_cfg: "Loihi2SimCfg"
+  lava_select_tag: "floating_pt"
+
+seeds:
+  data_split: 42        # fixed across all runs
+  init_seeds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+  # training-order seed = init seed (same value)
+
+experiment:
+  S: 10                 # number of seeds
+  P: 3                  # number of masking policies
+  A: 3                  # number of ablation conditions
+  policies: ["future_block", "random_drop", "multi_target"]
+  ablations: ["NoPos", "NoMaskTok", "OnlineTeacher"]
+  total_runs: 120       # S*(P+A)*2 substrates
+
+energy_proxy:
+  # Coefficients from published Loihi energy measurements
+  # alpha: synaptic events, beta: spikes, gamma: timesteps
+  alpha: 23.6e-12       # joules per synaptic event (Loihi 2)
+  beta: 81.0e-12        # joules per spike
+  gamma: 26.0e-9        # joules per timestep
+
+failure_gates:
+  collapse_variance_threshold: 0.001    # Var[z_hat] < 1e-3
+  collapse_consecutive_epochs: 3
+  saturation_spike_rate: 0.9            # mean spike rate > 0.9
+  silence_spike_count: 0                # total spikes = 0
+
+tolerances:
+  spike_mismatch_per_1000: 1
+  trace_max_abs_diff: 1.0e-4
+  readout_max_abs_diff: 1.0e-3
+  loss_relative_diff: 1.0e-6
