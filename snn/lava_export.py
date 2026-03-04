@@ -2,7 +2,8 @@
 
 Implements Section 5.6 weight export:
   - torch.nn.Linear weights mapped to Lava Dense (transposed)
-  - LIF parameters: du=0, dv=1-beta, vth=v_th
+  - LIF parameters: du=1 (pass-through, no current accumulation),
+    dv=1-beta, vth=v_th
   - Round-trip unit test verifies spike train equivalence
 
 Convention: W_Lava = W_torch^T (Lava uses (N_out, N_in) convention).
@@ -32,7 +33,7 @@ class LavaWeights:
 
     # Encoder LIF parameters
     encoder_dv: float   # 1 - beta
-    encoder_du: float   # 0
+    encoder_du: float   # 1 (pass-through)
     encoder_vth: float  # v_th
 
     # Readout: (H, H)
@@ -106,7 +107,7 @@ def export_weights(
     beta = model.encoder.lif.beta
     v_th = model.encoder.lif.v_th
     encoder_dv = 1.0 - beta
-    encoder_du = 0.0
+    encoder_du = 1.0  # pass-through: u[t] = a_in (no current accumulation)
 
     # Readout weights
     readout_w = model.encoder.readout.weight.detach().cpu().numpy()  # (H, H)
@@ -125,7 +126,7 @@ def export_weights(
     pred_beta = model.predictor.lif_pred.beta
     pred_vth = model.predictor.lif_pred.v_th
     predictor_dv = 1.0 - pred_beta
-    predictor_du = 0.0
+    predictor_du = 1.0  # pass-through: u[t] = a_in (no current accumulation)
 
     # Predictor readout
     pred_ro_w = model.predictor.pred_readout.weight.detach().cpu().numpy()

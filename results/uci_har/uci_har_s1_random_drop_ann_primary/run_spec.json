@@ -1,0 +1,8 @@
+{
+  "seed": 1,
+  "masking_policy": "random_drop",
+  "substrate": "ann",
+  "condition": "primary",
+  "ablation": null,
+  "dataset": "uci_har"
+}

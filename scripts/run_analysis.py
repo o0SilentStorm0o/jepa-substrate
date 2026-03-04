@@ -54,6 +54,15 @@ def collect_per_seed_means(
             run_id = f"s{seed}_{policy}_{substrate}_{condition}"
             csv_path = output_root / run_id / "results.csv"
 
+            # Also try dataset-prefixed layout: results/<dataset>/<dataset>_<run_id>/
+            if not csv_path.exists():
+                for subdir in output_root.iterdir():
+                    if subdir.is_dir() and subdir.name not in ("analysis",):
+                        alt = subdir / f"{subdir.name}_{run_id}" / "results.csv"
+                        if alt.exists():
+                            csv_path = alt
+                            break
+
             if not csv_path.exists():
                 logger.warning("Missing: %s", csv_path)
                 return None, None

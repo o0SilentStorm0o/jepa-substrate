@@ -9,6 +9,9 @@ Execution proceeds as a single RunSteps(num_steps=T) call using
 Loihi2SimCfg(select_tag="floating_pt").
 
 After the run, data is retrieved from sinks and monitors, then stop() is called.
+
+Window inference is sequential; Lava's internal multiprocessing
+(SharedMemoryManager) is incompatible with multiprocessing.Pool.
 """
 
 from __future__ import annotations
@@ -90,16 +93,25 @@ def _build_lava_graph(
 
     # --- Dense layers ---
     # DenseIn: input projection (H x D)
-    # Lava Dense: a_out = W @ s_in, weight shape (N_out, N_in)
-    # weights.dense_in_weights was transposed: (D, H) from export
-    # We need (H, D) for Lava Dense to compute H-dim output from D-dim input
-    dense_in = Dense(weights=weights.dense_in_weights.T.astype(np.float32))
+    # Receives graded float signals from RingBuffer -> num_message_bits=24
+    dense_in = Dense(
+        weights=weights.dense_in_weights.T.astype(np.float32),
+        num_message_bits=24,
+    )
 
     # DenseMask: mask channel weight (H x 1)
-    dense_mask = Dense(weights=weights.mask_weights.T.astype(np.float32))
+    # Receives graded float from RingBuffer -> num_message_bits=24
+    dense_mask = Dense(
+        weights=weights.mask_weights.T.astype(np.float32),
+        num_message_bits=24,
+    )
 
     # DensePos: identity pass-through (H x H)
-    dense_pos = Dense(weights=np.eye(H, dtype=np.float32))
+    # Receives graded float from RingBuffer -> num_message_bits=24
+    dense_pos = Dense(
+        weights=np.eye(H, dtype=np.float32),
+        num_message_bits=24,
+    )
 
     # --- Encoder LIF ---
     lif_enc = LIF(
@@ -120,7 +132,11 @@ def _build_lava_graph(
     dense_pred = Dense(weights=weights.pred_proj_weights[:H, :H].T.astype(np.float32))
 
     # Additional dense for positional part of predictor projection
-    dense_pos_pred = Dense(weights=weights.pred_proj_weights[H:, :H].T.astype(np.float32))
+    # Receives graded float from DensePos.a_out -> num_message_bits=24
+    dense_pos_pred = Dense(
+        weights=weights.pred_proj_weights[H:, :H].T.astype(np.float32),
+        num_message_bits=24,
+    )
 
     # --- Predictor LIF ---
     lif_pred = LIF(
@@ -163,6 +179,7 @@ def _build_lava_graph(
     dense_readout.a_out.connect(output_sink.a_in)
 
     # --- Monitors (for observability) ---
+    # Only spike monitors; membrane monitor omitted to reduce overhead
     monitors = {}
     if attach_monitor:
         mon_enc = Monitor()
@@ -172,10 +189,6 @@ def _build_lava_graph(
         mon_pred = Monitor()
         mon_pred.probe(lif_pred.s_out, T)
         monitors["pred_spikes"] = mon_pred
-
-        mon_v_enc = Monitor()
-        mon_v_enc.probe(lif_enc.v, T)
-        monitors["enc_membrane"] = mon_v_enc
 
     # Run config
     run_cfg = Loihi2SimCfg(select_tag="floating_pt")
@@ -259,17 +272,13 @@ def run_lava_inference_window(
     # Retrieve monitor data
     enc_spikes = None
     pred_spikes = None
-    enc_membrane = None
     if attach_monitor and graph["monitors"]:
         enc_spikes = graph["monitors"]["enc_spikes"].get_data()[
             graph["lif_enc"].name
-        ]["s_out"].T  # (T, H)
+        ]["s_out"]  # (T, H) — Monitor returns (T, H) natively
         pred_spikes = graph["monitors"]["pred_spikes"].get_data()[
             graph["lif_pred"].name
-        ]["s_out"].T  # (T, H)
-        enc_membrane = graph["monitors"]["enc_membrane"].get_data()[
-            graph["lif_enc"].name
-        ]["v"].T  # (T, H)
+        ]["s_out"]  # (T, H)
 
     t_read_end = time.perf_counter()
 
@@ -302,7 +311,6 @@ def run_lava_inference_window(
         "predictions": predictions,
         "enc_spikes": enc_spikes,
         "pred_spikes": pred_spikes,
-        "enc_membrane": enc_membrane,
         "total_spikes": total_spikes,
         "spike_rate": spike_rate,
         "synaptic_events": synaptic_events,
@@ -310,6 +318,106 @@ def run_lava_inference_window(
         "build_ms": build_ms,
         "monitor_ms": monitor_ms,
     }
+
+
+def _process_single_window(
+    weights_path_str: str,
+    x_window: np.ndarray,
+    mask: np.ndarray,
+    teacher_targets_dir_str: str,
+    output_dir_str: str,
+    idx: int,
+    T: int,
+    H: int,
+    c_mask: float,
+    energy_alpha: float,
+    energy_beta: float,
+    energy_gamma: float,
+    save_observables: bool,
+) -> WindowResult:
+    """Process a single window in an isolated process (for multiprocessing).
+
+    This is a module-level function so it can be pickled by
+    ``multiprocessing.Pool.starmap``.  Each worker loads its own copy
+    of the weights and builds a fresh Lava graph, avoiding shared-memory
+    leaks across windows.
+    """
+    weights = load_lava_weights(weights_path_str)
+    pos_encoding = sinusoidal_position_encoding_numpy(T, H)
+    teacher_targets_dir = Path(teacher_targets_dir_str)
+    output_dir = Path(output_dir_str)
+
+    # Load pre-computed teacher target
+    target_path = teacher_targets_dir / f"target_{idx:05d}.npz"
+    teacher_target = np.load(str(target_path))["targets"]  # (T, H)
+
+    # Run Lava inference
+    t_total_start = time.perf_counter()
+    lava_result = run_lava_inference_window(
+        weights, x_window, mask, pos_encoding, T, c_mask,
+        attach_monitor=save_observables,
+    )
+    t_total_end = time.perf_counter()
+
+    # Compute loss
+    loss = jepa_time_loss_numpy(
+        lava_result["predictions"], teacher_target, mask,
+    )
+
+    # Energy proxy (Eq. 8)
+    energy = (
+        energy_alpha * lava_result["synaptic_events"]
+        + energy_beta * lava_result["total_spikes"]
+        + energy_gamma * T
+    )
+
+    # Embedding stats
+    pred_stats = compute_embedding_stats(
+        lava_result["predictions"], mask, is_teacher=False,
+    )
+    teacher_stats = compute_embedding_stats(
+        teacher_target, mask, is_teacher=True,
+    )
+    pred_variance = float(np.var(lava_result["predictions"]))
+
+    result = WindowResult(
+        window_index=idx,
+        loss=loss,
+        forward_ms=lava_result["run_ms"],
+        teacher_ms=0.0,
+        overhead_ms=lava_result["build_ms"] + lava_result["monitor_ms"],
+        total_ms=(t_total_end - t_total_start) * 1000.0,
+        embedding_norm_mean=pred_stats["mean"],
+        embedding_norm_std=pred_stats["std"],
+        teacher_norm_mean=teacher_stats["mean"],
+        teacher_norm_std=teacher_stats["std"],
+        prediction_variance=pred_variance,
+        total_spikes=float(lava_result["total_spikes"]),
+        spike_rate=lava_result["spike_rate"],
+        synaptic_events=float(lava_result["synaptic_events"]),
+        energy_proxy=energy,
+    )
+
+    # Save observables (no membrane — monitor removed in production)
+    if save_observables:
+        obs_dir = output_dir / "observables"
+        save_observables_npz(
+            obs_dir / f"window_{idx:05d}.npz",
+            window_index=idx,
+            predictions=lava_result["predictions"],
+            teacher_targets=teacher_target,
+            spike_vectors_enc=lava_result["enc_spikes"],
+            spike_vectors_pred=lava_result["pred_spikes"],
+        )
+
+    if idx % 100 == 0:
+        logger.info(
+            "SNN window %d | loss=%.6f | spikes=%d | rate=%.4f | fwd=%.2fms",
+            idx, loss, lava_result["total_spikes"],
+            lava_result["spike_rate"], lava_result["run_ms"],
+        )
+
+    return result
 
 
 def run_snn_measurement(
@@ -324,7 +432,7 @@ def run_snn_measurement(
     energy_alpha: float = 23.6e-12,
     energy_beta: float = 81.0e-12,
     energy_gamma: float = 26.0e-9,
-    save_observables: bool = True,
+    save_observables: bool = False,
 ) -> List[WindowResult]:
     """Run full SNN measurement on the test set via Lava.
 
@@ -358,91 +466,41 @@ def run_snn_measurement(
     """
     output_dir = Path(output_dir)
     teacher_targets_dir = Path(teacher_targets_dir)
-    obs_dir = output_dir / "observables"
 
-    weights = load_lava_weights(weights_path)
-    pos_encoding = sinusoidal_position_encoding_numpy(T, H)
+    n_windows = len(test_windows)
+    logger.info(
+        "SNN measurement: %d windows, sequential execution, "
+        "save_observables=%s",
+        n_windows, save_observables,
+    )
 
+    # Sequential execution — Lava's internal multiprocessing (SharedMemoryManager)
+    # is incompatible with multiprocessing.Pool (daemon child limitation).
     results: List[WindowResult] = []
-
-    for idx in range(len(test_windows)):
-        x_window = test_windows[idx]  # (T, D)
-        mask = test_masks[idx]         # (T,)
-
-        # Load pre-computed teacher target
-        target_path = teacher_targets_dir / f"target_{idx:05d}.npz"
-        teacher_target = np.load(str(target_path))["targets"]  # (T, H)
-
-        # Run Lava inference
-        t_total_start = time.perf_counter()
-        lava_result = run_lava_inference_window(
-            weights, x_window, mask, pos_encoding, T, c_mask,
-            attach_monitor=True,
-        )
-        t_total_end = time.perf_counter()
-
-        # Compute loss
-        loss = jepa_time_loss_numpy(
-            lava_result["predictions"], teacher_target, mask,
-        )
-
-        # Energy proxy (Eq. 8)
-        energy = (
-            energy_alpha * lava_result["synaptic_events"]
-            + energy_beta * lava_result["total_spikes"]
-            + energy_gamma * T
-        )
-
-        # Embedding stats
-        pred_stats = compute_embedding_stats(
-            lava_result["predictions"], mask, is_teacher=False,
-        )
-        teacher_stats = compute_embedding_stats(
-            teacher_target, mask, is_teacher=True,
-        )
-        pred_variance = float(np.var(lava_result["predictions"]))
-
-        result = WindowResult(
-            window_index=idx,
-            loss=loss,
-            forward_ms=lava_result["run_ms"],
-            teacher_ms=0.0,
-            overhead_ms=lava_result["build_ms"] + lava_result["monitor_ms"],
-            total_ms=(t_total_end - t_total_start) * 1000.0,
-            embedding_norm_mean=pred_stats["mean"],
-            embedding_norm_std=pred_stats["std"],
-            teacher_norm_mean=teacher_stats["mean"],
-            teacher_norm_std=teacher_stats["std"],
-            prediction_variance=pred_variance,
-            total_spikes=float(lava_result["total_spikes"]),
-            spike_rate=lava_result["spike_rate"],
-            synaptic_events=float(lava_result["synaptic_events"]),
-            energy_proxy=energy,
+    for idx in range(n_windows):
+        result = _process_single_window(
+            str(weights_path),
+            test_windows[idx],       # (T, D)
+            test_masks[idx],         # (T,)
+            str(teacher_targets_dir),
+            str(output_dir),
+            idx,
+            T,
+            H,
+            c_mask,
+            energy_alpha,
+            energy_beta,
+            energy_gamma,
+            save_observables,
         )
         results.append(result)
-
-        # Save observables
-        if save_observables:
-            save_observables_npz(
-                obs_dir / f"window_{idx:05d}.npz",
-                window_index=idx,
-                predictions=lava_result["predictions"],
-                teacher_targets=teacher_target,
-                spike_vectors_enc=lava_result["enc_spikes"],
-                spike_vectors_pred=lava_result["pred_spikes"],
-                membrane_potentials=lava_result["enc_membrane"],
-            )
-
-        if idx % 100 == 0:
+        if (idx + 1) % 100 == 0:
             logger.info(
-                "SNN measurement: window %d/%d | loss=%.6f | "
-                "spikes=%d | rate=%.4f | fwd=%.2fms",
-                idx, len(test_windows), loss,
-                lava_result["total_spikes"], lava_result["spike_rate"],
-                lava_result["run_ms"],
+                "SNN measurement: window %d/%d", idx + 1, n_windows,
             )
 
     save_results_csv(results, output_dir / "results.csv")
+    logger.info("SNN measurement complete: %d windows", n_windows)
     return results
 
 

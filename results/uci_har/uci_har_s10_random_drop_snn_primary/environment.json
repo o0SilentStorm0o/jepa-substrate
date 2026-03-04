@@ -1,0 +1,18 @@
+{
+  "timestamp": "2026-03-03T23:49:56.537992+00:00",
+  "config_sha256": "",
+  "git_commit": "5c8cf286fa800f19d3f4d580073e1ecc69749b68",
+  "git_dirty": true,
+  "python_version": "3.10.19 (main, Oct  9 2025, 15:25:03) [Clang 17.0.0 (clang-1700.6.3.2)]",
+  "python_executable": "/Users/david/jepa-substrate/.venv/bin/python3",
+  "pytorch_version": "2.10.0",
+  "lava_version": "unknown",
+  "numpy_version": "1.26.4",
+  "os": "macOS-26.1-arm64-arm-64bit",
+  "os_name": "Darwin",
+  "os_release": "25.1.0",
+  "architecture": "arm64",
+  "cpu_model": "arm",
+  "ram_gb": 32.0,
+  "hostname": "David-MacBook-Pro.local"
+}

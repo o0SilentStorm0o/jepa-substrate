@@ -1,7 +1,0 @@
-{
-  "seed": 8,
-  "masking_policy": "future_block",
-  "substrate": "ann",
-  "condition": "OnlineTeacher",
-  "ablation": "OnlineTeacher"
-}

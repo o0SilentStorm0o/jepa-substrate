@@ -1,0 +1,8 @@
+{
+  "seed": 5,
+  "masking_policy": "future_block",
+  "substrate": "snn",
+  "condition": "NoPos",
+  "ablation": "NoPos",
+  "dataset": "uci_har"
+}

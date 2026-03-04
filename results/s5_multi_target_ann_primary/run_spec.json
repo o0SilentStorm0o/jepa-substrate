@@ -1,6 +1,0 @@
-{
-  "seed": 5,
-  "masking_policy": "multi_target",
-  "substrate": "ann",
-  "condition": "primary"
-}

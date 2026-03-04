@@ -6,25 +6,76 @@
 # After the freeze point (git tag freeze-v1), no value may change.
 # ============================================================================
 
-data:
-  dataset: "uci_har"
-  # UCI Human Activity Recognition Using Smartphones
-  url: "https://archive.ics.uci.edu/ml/machine-learning-databases/00240/UCI%20HAR%20Dataset.zip"
-  sha256: "2f853b3f1dab1361943d3e3c5e994a72df18e44e495a9a2c4c62c1e58da tried"
-  sampling_rate_hz: 50
-  window_length_sec: 2.56
-  T: 128                # samples per window (50 Hz * 2.56 s)
-  D: 6                  # input channels (3-axis accel + 3-axis gyro)
-  normalization: "zscore"  # per-channel z-score on training set only
-  split_ratios:
-    train: 0.70
-    val: 0.15
-    test: 0.15
-  # Subject IDs: 21 train / 4 val / 5 test out of 30
-  n_subjects: 30
-  n_train_subjects: 21
-  n_val_subjects: 4
-  n_test_subjects: 5
+# ---------------------------------------------------------------------------
+# Per-dataset configurations (K = 3 datasets)
+# ---------------------------------------------------------------------------
+datasets:
+  uci_har:
+    name: "UCI-HAR"
+    description: "UCI Human Activity Recognition Using Smartphones"
+    url: "https://archive.ics.uci.edu/ml/machine-learning-databases/00240/UCI%20HAR%20Dataset.zip"
+    sha256: "2f853b3f1dab1361943d3e3c5e994a72df18e44e495a9a2c4c62c1e58da tried"
+    domain: "inertial"
+    sampling_rate_hz: 50
+    window_length_sec: 2.56
+    T: 128              # samples per window (50 Hz * 2.56 s)
+    D: 6                # input channels (3-axis accel + 3-axis gyro)
+    normalization: "zscore"  # per-channel z-score on training set only
+    split_by: "subject_id"
+    n_subjects: 30
+    n_train_subjects: 21
+    n_val_subjects: 4
+    n_test_subjects: 5
+    N_train_windows: 7185
+    N_val_windows: 1527
+    N_test_windows: 1587
+    preprocessing: "none"  # raw signals used directly
+
+  speech_commands_v2:
+    name: "SpeechCommands V2"
+    description: "Google Speech Commands V2 — 35-class 1-second audio utterances"
+    url: "http://download.tensorflow.org/data/speech_commands_v0.02.tar.gz"
+    reference: "warden2018speech"
+    domain: "audio"
+    sampling_rate_hz: 16000
+    window_length_sec: 1.0
+    T: 128              # log-mel frames (hop ~7.8 ms at 16 kHz)
+    D: 80               # mel-frequency bins
+    normalization: "zscore"  # per-bin z-score on training set
+    split_by: "speaker_id"  # official by-speaker partition
+    n_classes: 35
+    N_train_windows: 84843
+    N_val_windows: 9981
+    N_test_windows: 11005
+    preprocessing: "log_mel_spectrogram"
+    mel_n_fft: 512
+    mel_hop_length: 125     # ceil(16000 / 128) ≈ 125 to yield T=128
+
+  ptb_xl_ecg:
+    name: "PTB-XL ECG"
+    description: "PTB-XL large-scale ECG dataset — 12-lead, 10 s records"
+    url: "https://physionet.org/content/ptb-xl/1.0.3/"
+    reference: "wagner2020ptbxl"
+    domain: "biomedical"
+    original_sampling_rate_hz: 500
+    target_sampling_rate_hz: 100   # downsample to 100 Hz
+    record_length_sec: 10
+    T: 128              # central 128-sample window from 1000 samples
+    D: 12               # 12-lead ECG
+    normalization: "zscore"  # per-lead z-score on training set
+    split_by: "patient_id"  # official fold-based by-patient partition
+    total_records: 21799
+    # Official folds 1–8 train, fold 9 val, fold 10 test
+    N_train_windows: 17418
+    N_val_windows: 2183
+    N_test_windows: 2198
+    preprocessing: "downsample_and_select_window"
+    downsample_factor: 5    # 500 Hz → 100 Hz → 1000 samples
+    window_index: 3          # 4th window (0-indexed), i.e. samples 384–511
+    # 7 non-overlapping windows of 128 from 1000 samples; use the middle one
+
+# Active dataset list (order determines dataset_id k = 0, 1, 2)
+active_datasets: ["uci_har", "speech_commands_v2", "ptb_xl_ecg"]
 
 model:
   H: 128                # latent dimension
@@ -80,12 +131,14 @@ seeds:
   # training-order seed = init seed (same value)
 
 experiment:
+  K: 3                  # number of datasets
   S: 10                 # number of seeds
   P: 3                  # number of masking policies
   A: 3                  # number of ablation conditions
   policies: ["future_block", "random_drop", "multi_target"]
   ablations: ["NoPos", "NoMaskTok", "OnlineTeacher"]
-  total_runs: 120       # S*(P+A)*2 substrates
+  runs_per_dataset: 120 # S*(P+A)*2 substrates per dataset
+  total_runs: 360       # K * S*(P+A)*2 substrates
 
 energy_proxy:
   # Coefficients from published Loihi energy measurements

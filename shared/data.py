@@ -1,14 +1,15 @@
 """Data pipeline for LavaJEPA experiment.
 
 Implements D1--D6 from the specification:
-  D1: Download (data/download.py)
-  D2: Subject split (by subject ID, not by random windows)
+  D1: Download (data/download.py, data/download_speech.py, data/download_ecg.py)
+  D2: Subject/speaker/patient split (by ID, not by random windows)
   D3: Windowing (fixed-length T=128, stride=T, no overlap)
   D4: Normalization (per-channel z-score on training windows only)
   D5: Mask generation (deterministic per-window seed)
   D6: Iterator (WindowDataset, sequential for measurement)
 
 Both ANN and SNN use this identical data pipeline.
+Supports multiple datasets: UCI-HAR, SpeechCommands V2, PTB-XL ECG.
 """
 
 from __future__ import annotations
@@ -286,8 +287,10 @@ def prepare_dataset(
     n_val_subjects: int = 4,
     n_test_subjects: int = 5,
     force_download: bool = False,
+    dataset_name: str = "uci_har",
+    dataset_cfg: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    """Full data preparation pipeline.
+    """Full data preparation pipeline (multi-dataset dispatcher).
 
     Runs D1--D4: download, split, window, normalize.
 
@@ -298,16 +301,54 @@ def prepare_dataset(
     split_seed : int
         Data-split seed.
     n_train_subjects, n_val_subjects, n_test_subjects : int
-        Number of subjects per split.
+        Number of subjects per split (UCI-HAR only).
     force_download : bool
         Re-download even if present.
+    dataset_name : str
+        One of "uci_har", "speech_commands_v2", "ptb_xl_ecg".
+    dataset_cfg : DatasetConfig, optional
+        Per-dataset config from the YAML (for dataset-specific params).
 
     Returns
     -------
     dict
         Contains ``"train"``, ``"val"``, ``"test"`` arrays (normalized),
-        normalization stats, and subject split mapping.
+        normalization stats, and split mapping.
     """
+    if dataset_name == "uci_har":
+        return _prepare_uci_har(
+            data_dir=data_dir,
+            split_seed=split_seed,
+            n_train_subjects=n_train_subjects,
+            n_val_subjects=n_val_subjects,
+            n_test_subjects=n_test_subjects,
+            force_download=force_download,
+        )
+    elif dataset_name == "speech_commands_v2":
+        return _prepare_speech_commands(
+            data_dir=data_dir,
+            force_download=force_download,
+            dataset_cfg=dataset_cfg,
+        )
+    elif dataset_name == "ptb_xl_ecg":
+        return _prepare_ptb_xl(
+            data_dir=data_dir,
+            force_download=force_download,
+            dataset_cfg=dataset_cfg,
+        )
+    else:
+        raise ValueError(f"Unknown dataset: {dataset_name}")
+
+
+def _prepare_uci_har(
+    data_dir: Path | str,
+    split_seed: int = 42,
+    n_train_subjects: int = 21,
+    n_val_subjects: int = 4,
+    n_test_subjects: int = 5,
+    force_download: bool = False,
+) -> Dict[str, Any]:
+    """UCI-HAR data preparation (original pipeline)."""
     from data.download import download_uci_har, load_raw_data
 
     data_dir = Path(data_dir)
@@ -350,7 +391,7 @@ def prepare_dataset(
     )
 
     logger.info(
-        "Split sizes: train=%d, val=%d, test=%d",
+        "UCI-HAR split sizes: train=%d, val=%d, test=%d",
         len(train_windows), len(val_windows), len(test_windows),
     )
 
@@ -370,6 +411,140 @@ def prepare_dataset(
         "mu": mu,
         "sigma": sigma,
         "split_map": split_map,
+        "n_train": len(train_norm),
+        "n_val": len(val_norm),
+        "n_test": len(test_norm),
+    }
+
+
+def _prepare_speech_commands(
+    data_dir: Path | str,
+    force_download: bool = False,
+    dataset_cfg: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Speech Commands V2 data preparation.
+
+    Downloads, computes log-mel spectrograms, splits by official speaker
+    lists, normalizes per-bin z-score on training set.
+    """
+    from data.download_speech import (
+        download_speech_commands,
+        load_speech_commands_data,
+    )
+
+    data_dir = Path(data_dir)
+    raw_dir = data_dir / "raw"
+
+    # D1: Download
+    dataset_dir = download_speech_commands(raw_dir, force=force_download)
+
+    # Mel params from config or defaults
+    n_fft = 512
+    hop_length = 125
+    n_mels = 80
+    if dataset_cfg is not None:
+        n_fft = dataset_cfg.mel_n_fft or n_fft
+        hop_length = dataset_cfg.mel_hop_length or hop_length
+
+    # D1+D2: Load with official speaker-based split
+    raw = load_speech_commands_data(
+        dataset_dir,
+        n_fft=n_fft,
+        hop_length=hop_length,
+        n_mels=n_mels,
+    )
+
+    train_windows = raw["train"]["signals"]  # (N, T, D)
+    val_windows = raw["val"]["signals"]
+    test_windows = raw["test"]["signals"]
+
+    logger.info(
+        "SpeechCommands split sizes: train=%d, val=%d, test=%d",
+        len(train_windows), len(val_windows), len(test_windows),
+    )
+
+    # D4: Normalization (per-bin z-score on training set)
+    mu, sigma = compute_normalization_stats(train_windows)
+    norm_path = data_dir / "processed" / "norm_stats.npz"
+    (data_dir / "processed").mkdir(parents=True, exist_ok=True)
+    save_normalization_stats(mu, sigma, norm_path)
+
+    train_norm = normalize(train_windows, mu, sigma)
+    val_norm = normalize(val_windows, mu, sigma)
+    test_norm = normalize(test_windows, mu, sigma)
+
+    return {
+        "train": train_norm,
+        "val": val_norm,
+        "test": test_norm,
+        "mu": mu,
+        "sigma": sigma,
+        "n_train": len(train_norm),
+        "n_val": len(val_norm),
+        "n_test": len(test_norm),
+    }
+
+
+def _prepare_ptb_xl(
+    data_dir: Path | str,
+    force_download: bool = False,
+    dataset_cfg: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """PTB-XL ECG data preparation.
+
+    Downloads, downsamples 500->100Hz, selects fixed window, splits by
+    official fold, normalizes per-lead z-score on training set.
+    """
+    from data.download_ecg import (
+        download_ptb_xl,
+        load_ptb_xl_data,
+    )
+
+    data_dir = Path(data_dir)
+    raw_dir = data_dir / "raw"
+
+    # D1: Download
+    dataset_dir = download_ptb_xl(raw_dir, force=force_download)
+
+    # Params from config or defaults
+    downsample_factor = 5
+    window_index = 3
+    if dataset_cfg is not None:
+        downsample_factor = dataset_cfg.downsample_factor or downsample_factor
+        window_index = dataset_cfg.window_index if dataset_cfg.window_index is not None else window_index
+
+    # D1+D2: Load with official fold-based split
+    raw = load_ptb_xl_data(
+        dataset_dir,
+        downsample_factor=downsample_factor,
+        window_index=window_index,
+    )
+
+    train_windows = raw["train"]["signals"]  # (N, 128, 12)
+    val_windows = raw["val"]["signals"]
+    test_windows = raw["test"]["signals"]
+
+    logger.info(
+        "PTB-XL split sizes: train=%d, val=%d, test=%d",
+        len(train_windows), len(val_windows), len(test_windows),
+    )
+
+    # D4: Normalization (per-lead z-score on training set)
+    mu, sigma = compute_normalization_stats(train_windows)
+    norm_path = data_dir / "processed" / "norm_stats.npz"
+    (data_dir / "processed").mkdir(parents=True, exist_ok=True)
+    save_normalization_stats(mu, sigma, norm_path)
+
+    train_norm = normalize(train_windows, mu, sigma)
+    val_norm = normalize(val_windows, mu, sigma)
+    test_norm = normalize(test_windows, mu, sigma)
+
+    return {
+        "train": train_norm,
+        "val": val_norm,
+        "test": test_norm,
+        "mu": mu,
+        "sigma": sigma,
         "n_train": len(train_norm),
         "n_val": len(val_norm),
         "n_test": len(test_norm),

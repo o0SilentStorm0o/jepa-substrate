@@ -62,6 +62,14 @@ def load_per_seed_means(
         for substrate, target in [("ann", ann_vals), ("snn", snn_vals)]:
             run_id = f"s{seed}_{policy}_{substrate}_{condition}"
             csv_path = results_dir / run_id / "results.csv"
+            # Fallback: dataset-prefixed layout  results/<ds>/<ds>_<run_id>/
+            if not csv_path.exists():
+                for sub in results_dir.iterdir():
+                    if sub.is_dir():
+                        alt = sub / f"{sub.name}_{run_id}" / "results.csv"
+                        if alt.exists():
+                            csv_path = alt
+                            break
             if not csv_path.exists():
                 return np.array([]), np.array([])
             with open(csv_path) as f:

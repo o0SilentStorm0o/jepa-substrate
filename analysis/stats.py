@@ -299,6 +299,7 @@ class ComparisonSpec:
     condition: str
     ann_values: np.ndarray
     snn_values: np.ndarray
+    dataset: str = ""
 
 
 @dataclass

@@ -1,7 +1,0 @@
-{
-  "seed": 9,
-  "masking_policy": "future_block",
-  "substrate": "ann",
-  "condition": "NoMaskTok",
-  "ablation": "NoMaskTok"
-}

@@ -32,13 +32,18 @@ references.bib
 *.lof
 *.lot
 *.pdf
+!results/analysis/*.pdf
 
 # Large experiment artifacts (not tracked — regenerate via scripts)
 # Observables: ~280k .npz files (~29 GB total)
 results/*/observables/
+results/*/*/observables/
 results/*/teacher_targets/
+results/*/*/teacher_targets/
 results/*/checkpoint_best.pt
+results/*/*/checkpoint_best.pt
 results/*/checkpoint_final.pt
+results/*/*/checkpoint_final.pt
 *.npz
 *.pt
 
@@ -51,6 +56,9 @@ results/*_summary.json
 
 # macOS
 .DS_Store
+
+# UTB thesis template (not part of experiment repo)
+sablona_BP_DP_LaTeX_2025/
 
 # VS Code
 .vscode/
