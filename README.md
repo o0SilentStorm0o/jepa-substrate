@@ -11,7 +11,9 @@ This repository contains the complete source code, experiment scripts, configura
 | Substrate | Encoder | Training | Inference |
 |-----------|---------|----------|-----------|
 | **ANN** | 1-layer GRU (H=128) | PyTorch (CPU) | PyTorch (CPU, no grad) |
-| **SNN** | Recurrent LIF neurons (H=128) | PyTorch + surrogate gradients | Intel Lava (CPU simulation) |
+| **SNN** | Recurrent LIF neurons (H=128) | PyTorch + surrogate gradients | PyTorch (CPU, no grad)† |
+
+> †The original design planned Intel Lava CPU simulation for SNN inference. Lava process-graph equivalence was verified offline (acceptance tests T-E1–T-E3, 100% spike match), but all reported measurements use PyTorch for both substrates.
 
 Both substrates share identical task contracts, latent dimensions, masking policies, loss functions, and evaluation protocols. The only variable is the computational substrate.
 
@@ -24,6 +26,14 @@ Across **120 experiments** (10 seeds × 6 conditions × 2 substrates), we find t
 | Future-block | 1.801 ± 0.056 | 7.189 ± 1.303 | −4.17 | ANN ✓ |
 | Random-drop | 1.841 ± 0.060 | 1.698 ± 0.129 | +1.03 | **SNN ✓** |
 | Multi-target | 1.865 ± 0.067 | 5.654 ± 0.276 | −12.30 | ANN ✓ |
+
+**Latency** (PyTorch CPU, single-thread, median of 1,000 timed passes):
+
+| Masking Policy | ANN (ms) | SNN (ms) | Ratio |
+|----------------|----------|----------|-------|
+| Future-block | 2.82 ± 0.03 | 7.16 ± 0.04 | 2.5× |
+| Random-drop | 2.81 ± 0.03 | 7.17 ± 0.07 | 2.6× |
+| Multi-target | 2.82 ± 0.03 | 7.18 ± 0.09 | 2.5× |
 
 **Ablation highlights** (future-block policy):
 - **OnlineTeacher:** SNN loss drops from 7.19 → 0.38 (18.9× improvement), making SNN dramatically better than ANN (_d_ = +27.27)
@@ -62,8 +72,9 @@ jepa-substrate/
 ├── snn/                      # SNN (LIF) implementation
 │   ├── model.py              # LIF encoder + spiking predictor + readout
 │   ├── train.py              # SNN training (surrogate gradient BPTT)
+│   ├── evaluate.py           # SNN test-set evaluation (PyTorch)
 │   ├── lava_export.py        # Weight export PyTorch → Lava
-│   └── lava_inference.py     # Lava CPU inference & measurement
+│   └── lava_inference.py     # Lava CPU inference (offline verification & latency benchmark)
 ├── analysis/
 │   ├── stats.py              # Full statistical pipeline (S1–S6 from paper)
 │   └── plots.py              # Plotting utilities
@@ -75,18 +86,20 @@ jepa-substrate/
 │   ├── generate_plots.py     # Publication figure generation
 │   ├── benchmark_time_budget.py  # Micro-benchmarks for time budget
 │   └── benchmark_lava.py     # Lava-specific benchmarks
-├── tests/                    # 130 acceptance tests
+├── tests/                    # 145 acceptance tests
 │   ├── test_invariants.py    # T-I1..T-I4 (same mask, loss, regime, latency)
 │   ├── test_export.py        # T-E1..T-E3 (spike/trace/readout round-trip)
-│   └── test_failure_gates.py # T-F1..T-F3 (collapse, saturation, silence)
+│   ├── test_failure_gates.py # T-F1..T-F3 (collapse, saturation, silence)
+│   └── test_lava_verification.py  # Lava process-graph equivalence tests
 ├── data/
 │   └── download.py           # Dataset download + SHA-256 verification
 ├── results/
-│   ├── s{1..10}_{policy}_{substrate}_{condition}/
-│   │   ├── results.csv       # Per-window metrics (loss, latency, spikes, ...)
-│   │   ├── run_spec.json     # Run specification
-│   │   ├── environment.json  # Hardware/software environment
-│   │   └── training_history.json
+│   ├── uci_har/
+│   │   └── uci_har_s{1..10}_{policy}_{substrate}_{condition}/
+│   │       ├── results.csv       # Per-window metrics (loss, latency, spikes, ...)
+│   │       ├── run_spec.json     # Run specification
+│   │       ├── environment.json  # Hardware/software environment
+│   │       └── training_history.json
 │   └── analysis/
 │       ├── statistical_results.csv   # All statistical tests
 │       ├── table1.tex                # LaTeX results table
@@ -122,7 +135,7 @@ pip install -r requirements.txt
 python -m data.download
 ```
 
-### Run Tests (130 acceptance tests)
+### Run Tests (145 acceptance tests)
 
 ```bash
 pytest tests/ -v
@@ -132,11 +145,11 @@ pytest tests/ -v
 
 ```bash
 # Primary experiments: 10 seeds × 3 policies × 2 substrates = 60 runs
-# Estimated time: ~14 hours on Apple M2 Max (single-thread)
+# Estimated time: ~3 hours on Apple M2 Max (single-thread, PyTorch)
 python scripts/run_primary.py
 
 # Ablation experiments: 10 seeds × 3 conditions × 2 substrates = 60 runs
-# Estimated time: ~14 hours
+# Estimated time: ~3 hours
 python scripts/run_ablation.py
 
 # Statistical analysis + publication figures
@@ -197,8 +210,10 @@ Aggregated analysis outputs are in `results/analysis/`.
 
 All experiments were conducted on:
 - Apple MacBook Pro (M2 Max), 12 cores (8P + 4E), 32 GB unified memory
-- macOS, single-thread CPU execution
-- PyTorch CPU (ANN) vs. Intel Lava CPU simulation (SNN)
+- macOS Sequoia 15.3.1, single-thread CPU execution
+- PyTorch 2.6.0 CPU (both substrates)
+- Intel Lava 0.13.0 (offline equivalence verification only)
+- Total experiment time: 5.81 h (22 Feb 2026, 12:08–18:47)
 
 ## Citation
 
